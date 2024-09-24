@@ -5,10 +5,14 @@ const jwt=require("jsonwebtoken");
 const cors=require("cors");
 const multer=require("multer");
 const path=require("path");
+const { v4: uuidv4 } = require('uuid'); 
+
+const mongoose=require("mongoose");
 //IMport files
 const User=require("./models/user");
 const Conversation=require("./models/Converation");
 const Message=require("./models/Messages");
+const Groups=require("./models/Groups")
 const io=require('socket.io')(8000,{
     cors:{
         origin:'http://localhost:5173'
@@ -18,10 +22,13 @@ const io=require('socket.io')(8000,{
 const app=express();
 const port=process.env.PORT || 3000;
 
+const groups={};
 
 cors:(3000,{
     origin:'http://localhost:5173'
 })
+
+let users=[]
 
 //socket io
 io.on('connection',socket=>{
@@ -63,6 +70,131 @@ io.on('connection',socket=>{
                 isImage
             });
         }
+    });
+
+    socket.on('sendGroupMessage',async ({senderId,receiverId,message,conversationId,isImage})=>{
+        // const receiver=users.find(user=>user.userId===receiverId);
+        const sender=users.find(user=>user.userId===senderId);
+        console.log("users",users);
+        const user=await User.findById(senderId);
+        // console.log(isImage);
+        console.log("dfghjk",receiverId);
+        
+        const group=await Groups.find({_id:receiverId});
+        console.log("grpou",group);
+        // const receiver=users.find(user=>user.userId===receiverId);
+        // const sender=users.find(user=>user.userId===senderId);
+        if(group.length>0){
+            const members=group[0].members;
+            // console.log("memmbers",members);
+            for(const memberId of members){
+                // console.log("memId",memberId);
+                const member=users.find((user)=>{
+                    // console.log("user",user);
+                    if(user.userId==memberId){
+                        return user;
+                    }
+                });
+                // const member=await User.find({_id:memberId});
+                // console.log("mem",member);
+                if(member){
+                    console.log("hii",member.socketId);
+                    io.to(member.socketId).emit('getGroupMessage',{
+                        senderId,
+                        message,
+                        conversationId,
+                        receiverId,
+                        user:{id:user._id,fullName:user.fullName,email:user.email},
+                        isImage
+                    });
+                }
+            };
+        }
+
+        // io.to(receiverId).to(sender.socketId).emit('getGroupMessage',{
+        //     senderId,
+        //     message,
+        //     conversationId,
+        //     receiverId,
+        //     user:{id:user._id,fullName:user.fullName,email:user.email},
+        //     isImage
+        // });
+    });
+
+    socket.on('createGroup',({groupName,groupDesc,userId})=>{
+        const group=new Groups({
+            groupName:groupName,
+            groupDesc:groupDesc,
+            createdBy:userId,
+            members:[userId]
+        });
+        group.save();//group created
+        const id=(group._id).toString();
+        console.log(id);
+        socket.join(id);
+        
+        const conversation=new Conversation({
+            members:[userId,id]
+        });
+
+        conversation.save();
+        const user=users.find(user=>user.userId==userId);
+        console.log("user",user);
+        io.to(user.socketId).emit("groupCreated",{
+            id:group._id, 
+            groupName:groupName,
+            groupDesc:groupDesc,
+            createdBy:userId,
+            members:[userId],
+            conversationId:conversation._id,
+        });
+    });
+
+    socket.on("leaveGroup",async ({groupId,userId})=>{
+        const group=await Groups.find({_id:groupId,createdBy:userId});
+        if(group.length>0){
+            //now we will delete the group from the databse and delete all the conversations whose member includes the groupId
+            await Groups.findByIdAndDelete(new mongoose.Types.ObjectId(groupId));
+            await Conversation.deleteMany({members:{$in:[groupId]}});
+            // const user=users.find(user=>user.userId==userId);
+            const members=group[0].members;
+            for(const member of members){
+                const usert=users.find(user=>user.userId==member);
+                io.to(usert?.socketId).emit("leaveusGroup",{
+                    groupId,
+                })
+            }
+            // io.to(user?.socketId).emit("leaveusGroup",{
+            //     groupId,
+            // });
+
+        }else{
+        const updatedGroup = await Groups.findByIdAndUpdate(
+            new mongoose.Types.ObjectId(groupId),
+            { $pull: { members: new mongoose.Types.ObjectId(userId) } }, // Use $pull to remove the member
+            { new: true } // Return the updated document
+        );
+        await Conversation.deleteMany({
+            members:{
+                $all:[groupId,userId],
+            }
+        });
+        const user1=users.find(user=>user.userId==userId);
+        const members=updatedGroup.members;
+        const user = await User.find({_id:userId});
+        io.to(user1?.socketId).emit("leavemeGroup",{
+            name:user?.fullName,
+            group:updatedGroup
+        });
+        
+        for(const member of members){
+            const usert=users.find(user=>user.userId==member);
+            io.to(usert?.socketId).emit("leaveGroup",{
+                name:user?.fullName,
+                group:updatedGroup
+            })
+        }}
+        
     })
 
     socket.on('disconnect',()=>{
@@ -77,7 +209,7 @@ app.use(express.urlencoded({extended:true}));
 app.use(cors());
 app.use(express.static(path.resolve('./public')))
 
-let users=[]
+
 
 const storage=multer.diskStorage({
     destination: function (req, file, cb) {
@@ -221,6 +353,7 @@ app.get("/api/conversation/:userId",async (req,res)=>{
     }
 });
 
+
 app.post('/api/image',upload.single("file"),async(req,res)=>{
     try{
         const {conversationId,senderId,receiverId}=req.body;
@@ -292,8 +425,12 @@ app.get("/api/message/:conversationId",async (req,res)=>{
     try{
 
         const checkMessages=async (conversationId)=>{
+            console.log("conversationId",conversationId);
             const messages=await Message.find({conversationId});
-            // console.log("messages"+messages);
+            // .sort({createdAt:-1})
+            // .skip(page*limit)
+            // .limit(limit);
+            console.log("messages"+messages);
             const messageUserdata=Promise.all(messages.map(async (message)=>{
                 const sender=await User.findById(message.senderId);
                 // console.log(sender);
@@ -304,28 +441,21 @@ app.get("/api/message/:conversationId",async (req,res)=>{
                         fullName:sender.fullName
                     },
                     message:message.message,
-                    isImage:message.isImage
+                    isImage:message.isImage,
+                    createdAt:message.createdAt,
                 }
             }));
             const userd=await messageUserdata;
-            // console.log(userd);
+            userd.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+            console.log(userd);
             console.log("Sending the messages");
             return res.status(200).json(userd);
         }
 
         const conversationId=req.params.conversationId;
+        // const {page,limit}=req.query;
         if(conversationId==="new"){
-            // const checkConversation=await Conversation.find({ members : [req.query.senderId,req.query.receiverId]});
-            // const checkConversation2=await Conversation.find({ members : [req.query.receiverId,req.query.senderId]});
-            // console.log(checkConversation[0]?._id)
-            // console.log(checkConversation2[0]?._id)
-            // if(checkConversation.length>0){
-            //     console.log("Hello i have found with a previous conversation Id");
-            //     return checkMessages(checkConversation[0]._id);
-            // }
-            // if(checkConversation2[0]?._id){
-            //     return checkMessages(checkConversation[0]._id);
-            // }
+            console.log("I am here inside new");
             return res.status(200).json([]);
         }
         return checkMessages(conversationId);
@@ -335,6 +465,46 @@ app.get("/api/message/:conversationId",async (req,res)=>{
         console.log(err);
         return res.send("error in server");
     }
+});
+
+app.get("/api/groupMessage",async (req,res)=>{  
+    // const group=Groups.find({_id:req.query.groupId});
+
+    const conversations=await Conversation.find({members:{
+        $in:[req.query.groupId]
+    }});
+
+    console.log("conversations",conversations);
+
+    let allMessages=[]
+
+    console.log("conversations",conversations); 
+    for(const conversation of conversations){
+        console.log("conversation",conversation);
+        const messages=await Message.find({conversationId:conversation._id});
+        console.log("messages",messages);
+        const messageUserdata=await Promise.all(messages.map(async (message)=>{
+            const sender=await User.findById(message.senderId);
+            console.log("sender",sender);
+            return {
+                user:{
+                    id:sender._id,
+                    email:sender.email,
+                    fullName:sender.fullName
+                },
+                message:message.message,
+                isImage:message.isImage,
+                createdAt:message.createdAt,
+            }
+        }));
+        const data=await messageUserdata; 
+        allMessages = [...allMessages,...data];
+    }
+    console.log("allMessages",allMessages);
+    allMessages.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    console.log("allMessages",allMessages);
+    // this will be all the messages of all conversations in a group
+    res.json(allMessages);
 });
 
 app.get("/api/users",async (req,res)=>{
@@ -354,6 +524,83 @@ app.get('/download/uploads', (req, res) => {
     const file = __dirname +'/public/uploads/' + req.query.filename;
     res.download(file); // Set header to force download
 });
+
+app.get('/api/allGroups',async(req,res)=>{
+    try{
+        const groups=await Groups.find({});
+        
+        return res.status(200).json({"data":await groups});
+    }catch(err){
+        console.log(err);
+        return res.send("error in server");
+    }
+})
+
+app.get('/api/joinedGroups',async(req,res)=>{
+    try{
+        // console.log(1);
+        // console.log("queery",req.query);
+        const conversation=await Conversation.find({members:{
+            $eq : [req.query.groupId,req.query.userId]
+        } });
+        // console.log(2);
+        if(conversation.length>0){
+            return res.status(200).json({"conversationId":conversation[0]?._id.toString()});
+        }
+        // console.log(3);
+        const conversation1=await Conversation.find({members:{
+            $eq : [req.query.userId,req.query.groupId]
+        } });
+        // console.log(conversation1,conversation);
+        if(conversation1.length>0){
+            
+            return res.status(200).json({"conversationId":conversation1[0]._id.toString()});
+        }
+    }catch(err){
+        console.log(err);
+        return res.send("error in server");
+    }
+})
+
+app.post('/api/addToGroup',async (req,res)=>{
+    console.log(req.body);
+    const grpid=req.body.groupId;
+    const userid=req.body.userId;
+    console.log(grpid);
+    const group=await Groups.find({_id:grpid});
+    if(group.length===0){
+        return res.status(404).send("Group not found");
+    }
+    group[0].members.push(userid);
+    group[0].save();
+
+    const conversation=new Conversation({
+        members:[grpid,userid]
+    });
+    conversation.save();
+
+    console.log("conversation",conversation);
+    console.log("conversationId",conversation._id);
+    return res.status(200).json({"conversationId":conversation._id})
+    
+    
+    // Groups.findByIdAndUpdate(grpid,{$push:{users:userid}},{new:true},(err,doc)=>{
+    //     if(err){
+    //         console.log(err);
+    //         return res.status(500).send("Error");
+    //     }
+    //     Conversation.findOneAndUpdate({members:{
+    //         $all:[userid,grpid]
+    //     }},{$set:{members:[userid,grpid]}},{new:true},(err,doc1)=>{
+    //         if(err){
+    //             console.log(err);
+    //             return res.status(500).send("Error");
+    //         }
+    //         return res.status(200).send("User added to group successfully");
+    //     })
+    // })
+
+})
 
 app.listen(port,()=>{
     console.log("Server Connected");

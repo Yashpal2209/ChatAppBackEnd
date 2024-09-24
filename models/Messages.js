@@ -13,6 +13,10 @@ const msgSchema=mongoose.Schema({
     isImage:{
         type:Boolean,
         default:false
+    },
+    createdAt:{
+        type:Date,
+        default:Date.now(),
     }
 });
 
